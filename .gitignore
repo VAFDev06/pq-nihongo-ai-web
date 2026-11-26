@@ -1,0 +1,32 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Dependencies & bundled local tools
+frontend/node_modules/
+backend/.mvn/maven/
+
+# Test and build outputs
+frontend/dist/
+frontend/build/
+backend/target/
+coverage/
+*.jar
+*.class
+*.log
+
+# User uploads & runtime data
+uploads/
+backend/uploads/
+
+# Database backups
+*.dump
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
