@@ -39,7 +39,7 @@ export const PublicLayout = () => {
       </main>
 
       <footer className="py-3 text-center text-muted small">
-        &copy; {new Date().getFullYear()} PQ Nihongo AI - Đồ án 4 VKU.
+        &copy; {new Date().getFullYear()} PQ Nihongo AI.
       </footer>
     </div>
   );
