@@ -3,8 +3,14 @@ import { Link } from 'react-router-dom';
 import axiosClient from '../../api/axiosClient';
 import AudioButton from '../../components/common/AudioButton';
 import FuriganaText from '../../components/common/FuriganaText';
+import ShadowingEvaluationPanel from '../../components/shadowing/ShadowingEvaluationPanel';
 import { useAuth } from '../../auth/AuthContext';
 import { TTS_SPEED_OPTIONS, speakJapanese, speakJapaneseSequence, stopJapaneseAudio } from '../../utils/tts';
+import {
+  ShadowingAudioRecorder,
+  isMediaRecorderSupported,
+  formatDuration,
+} from '../../utils/shadowingRecorder';
 import {
   Mic,
   MicOff,
@@ -15,7 +21,6 @@ import {
   Edit3,
   List,
   Loader2,
-  Award,
   AlertCircle,
   Eye,
   EyeOff,
@@ -29,7 +34,6 @@ import {
   Volume2,
   Languages,
   RefreshCw,
-  RotateCcw,
 } from 'lucide-react';
 
 // Hàm trích xuất YouTube Video ID chuẩn 11 ký tự từ mọi dạng URL YouTube
@@ -68,6 +72,8 @@ export const ShadowingList = () => {
   const [playingCustomIdx, setPlayingCustomIdx] = useState(-1);
   const [activeCustomTargetIdx, setActiveCustomTargetIdx] = useState(-1); // -1 = full text, >=0 = specific sentence
   const [isRecording, setIsRecording] = useState(false);
+  const [customRecordingSec, setCustomRecordingSec] = useState(0);
+  const [customAudioUrl, setCustomAudioUrl] = useState(null);
   const [transcript, setTranscript] = useState('');
   const [submittingCustom, setSubmittingCustom] = useState(false);
   const [customResult, setCustomResult] = useState(null);
@@ -93,8 +99,10 @@ export const ShadowingList = () => {
   const [ytPlaybackRate, setYtPlaybackRate] = useState(1.0);
   const [ytHardIds, setYtHardIds] = useState(new Set());
   const [ytResultsBySegId, setYtResultsBySegId] = useState({});
+  const [ytAudioUrlsBySegId, setYtAudioUrlsBySegId] = useState({});
   const [ytTranscript, setYtTranscript] = useState('');
   const [ytRecording, setYtRecording] = useState(false);
+  const [ytRecordingSec, setYtRecordingSec] = useState(0);
   const [ytScoring, setYtScoring] = useState(false);
   const [ytFromCache, setYtFromCache] = useState(false);
   const [ytTranslatedCount, setYtTranslatedCount] = useState(0);
@@ -108,6 +116,9 @@ export const ShadowingList = () => {
   const ytTranslateCancelRef = useRef(false);
   const ytSegmentsRef = useRef([]);
   const ytActiveSegIndexRef = useRef(0);
+  const recorderRef = useRef(null);
+  const customAudioUrlRef = useRef(null);
+  const ytAudioUrlsRef = useRef({});
   const recognitionRef = useRef(null);
   const recordingTargetRef = useRef('custom'); // 'custom' | 'youtube'
   const latestCustomTranscriptRef = useRef('');
@@ -137,6 +148,17 @@ export const ShadowingList = () => {
     return () => {
       ytTranslateCancelRef.current = true;
       stopJapaneseAudio();
+      recorderRef.current?.cancel();
+      if (customAudioUrlRef.current) {
+        try {
+          URL.revokeObjectURL(customAudioUrlRef.current);
+        } catch {}
+      }
+      Object.values(ytAudioUrlsRef.current).forEach((u) => {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {}
+      });
       if (ytIntervalRef.current) clearInterval(ytIntervalRef.current);
       if (ytSyncIntervalRef.current) clearInterval(ytSyncIntervalRef.current);
     };
@@ -248,12 +270,15 @@ export const ShadowingList = () => {
       };
 
       recognition.onerror = () => {
-        setIsRecording(false);
-        setYtRecording(false);
-        autoScoreTargetOnEndRef.current = null;
+        if (!recorderRef.current?.isRecording) {
+          setIsRecording(false);
+          setYtRecording(false);
+          autoScoreTargetOnEndRef.current = null;
+        }
       };
 
       recognition.onend = () => {
+        if (recorderRef.current?.isRecording) return;
         setIsRecording(false);
         setYtRecording(false);
         const target = autoScoreTargetOnEndRef.current;
@@ -451,37 +476,140 @@ export const ShadowingList = () => {
     }
   };
 
-  const toggleYoutubeRecording = () => {
-    if (!recognitionRef.current) {
-      setYtShowDiff(true);
-      alert('Trình duyệt không hỗ trợ Web Speech API. Bạn có thể nhập câu đọc vào ô đối chiếu để kiểm tra.');
+  const evaluateYoutubeAudioWithLocalAi = async (recording, fallbackText = '') => {
+    const seg = ytSegmentsRef.current[ytActiveSegIndexRef.current];
+    if (!seg) return;
+    if (!recording?.blob || recording.blob.size === 0) {
+      setYtNotice('Không thu được dữ liệu âm thanh từ micro. Vui lòng thử ghi âm lại.');
+      return;
+    }
+    if (recording.durationSec < 0.35) {
+      setYtNotice('Thời gian ghi âm quá ngắn. Vui lòng đọc trọn câu tiếng Nhật.');
+      return;
+    }
+    if (isScoringYtRef.current) return;
+
+    if (recording.objectUrl) {
+      setYtAudioUrlsBySegId((prev) => {
+        if (prev[seg.id]) {
+          try {
+            URL.revokeObjectURL(prev[seg.id]);
+          } catch {}
+        }
+        const next = { ...prev, [seg.id]: recording.objectUrl };
+        ytAudioUrlsRef.current = next;
+        return next;
+      });
+    }
+
+    isScoringYtRef.current = true;
+    setYtScoring(true);
+    try {
+      const formData = new FormData();
+      formData.append('audio', recording.blob, recording.filename || 'youtube-shadowing.webm');
+      formData.append('textJa', seg.textJa || '');
+      if (seg.vietnameseTranslation || seg.textVi) {
+        formData.append('textVi', seg.vietnameseTranslation || seg.textVi);
+      }
+      formData.append('playbackSpeed', String(ytPlaybackRate || 1.0));
+      if (fallbackText && fallbackText.trim()) {
+        formData.append('fallbackTranscript', fallbackText.trim());
+      }
+
+      const res = await axiosClient.post('/shadowing/custom/evaluate', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 130000,
+      });
+
+      if (res.success && res.data) {
+        const recognized = res.data.recognizedText || fallbackText || '';
+        latestYtTranscriptRef.current = recognized;
+        setYtTranscript(recognized);
+        setYtShowDiff(true);
+        setYtResultsBySegId((prev) => ({
+          ...prev,
+          [seg.id]: res.data,
+        }));
+
+        if (ytAutoAdvance && ytActiveSegIndexRef.current + 1 < ytSegmentsRef.current.length) {
+          setTimeout(() => {
+            playYoutubeSegment(ytActiveSegIndexRef.current + 1);
+          }, 1200);
+        }
+      }
+    } catch (err) {
+      setYtNotice(err.response?.data?.message || 'Chấm điểm phát âm bằng Local AI thất bại.');
+    } finally {
+      setYtScoring(false);
+      isScoringYtRef.current = false;
+    }
+  };
+
+  const toggleYoutubeRecording = async () => {
+    if (ytRecording) {
+      setYtRecording(false);
+      if (recorderRef.current?.isRecording) {
+        autoScoreTargetOnEndRef.current = null;
+        try {
+          recognitionRef.current?.stop();
+        } catch {}
+        const recording = await recorderRef.current.stop();
+        await evaluateYoutubeAudioWithLocalAi(recording, latestYtTranscriptRef.current);
+        return;
+      }
+      autoScoreTargetOnEndRef.current = 'youtube';
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        setYtRecording(false);
+      }
       return;
     }
 
-    if (ytRecording) {
-      // Người dùng nhấn Dừng ghi âm -> Tự động dừng và tự động chấm điểm câu YouTube hiện tại
-      autoScoreTargetOnEndRef.current = 'youtube';
+    if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') {
       try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        setYtRecording(false);
-      }
-    } else {
-      if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') {
-        try {
-          ytPlayerRef.current.pauseVideo();
-        } catch (e) {}
-      }
-      recordingTargetRef.current = 'youtube';
-      autoScoreTargetOnEndRef.current = null;
-      latestYtTranscriptRef.current = '';
-      setYtTranscript('');
+        ytPlayerRef.current.pauseVideo();
+      } catch {}
+    }
+    recordingTargetRef.current = 'youtube';
+    autoScoreTargetOnEndRef.current = null;
+    latestYtTranscriptRef.current = '';
+    setYtRecordingSec(0);
+    setYtTranscript('');
+
+    if (isMediaRecorderSupported()) {
       try {
-        recognitionRef.current.start();
+        const recorder = new ShadowingAudioRecorder({
+          onDurationChange: (sec) => setYtRecordingSec(sec),
+          maxSeconds: 35,
+        });
+        recorderRef.current = recorder;
+        await recorder.start();
         setYtRecording(true);
+        try {
+          recognitionRef.current?.start();
+        } catch {}
       } catch (err) {
-        console.error(err);
+        setYtNotice(
+          err?.name === 'NotAllowedError'
+            ? 'Vui lòng cấp quyền Micro cho trình duyệt để ghi âm.'
+            : err?.message || 'Không thể khởi động micro.'
+        );
       }
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      setYtShowDiff(true);
+      setYtNotice('Trình duyệt không hỗ trợ ghi âm micro hoặc Web Speech API.');
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setYtRecording(true);
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -525,34 +653,140 @@ export const ShadowingList = () => {
     }
   };
 
-  const toggleRecordingCustom = () => {
-    if (!recognitionRef.current) {
-      setShowCustomComparison(true);
-      alert('Trình duyệt của bạn không hỗ trợ Web Speech API tiếng Nhật.');
+  const evaluateCustomAudioWithLocalAi = async (recording, fallbackText = '') => {
+    const targetSentenceObj =
+      activeCustomTargetIdx >= 0 && translatedSentences[activeCustomTargetIdx]
+        ? translatedSentences[activeCustomTargetIdx]
+        : null;
+    const expectedJa = targetSentenceObj ? targetSentenceObj.japanese : customJa.trim();
+    const expectedVi = targetSentenceObj
+      ? targetSentenceObj.vietnamese
+      : translatedSentences.map((s) => s.vietnamese).filter(Boolean).join(' ');
+
+    if (!expectedJa) {
+      setCustomError('Vui lòng nhập câu tiếng Nhật bạn muốn luyện tập.');
+      return;
+    }
+    if (!recording?.blob || recording.blob.size === 0) {
+      setCustomError('Không thu được dữ liệu âm thanh từ micro. Vui lòng thử ghi âm lại.');
+      return;
+    }
+    if (recording.durationSec < 0.35) {
+      setCustomError('Thời gian ghi âm quá ngắn. Vui lòng đọc trọn câu tiếng Nhật.');
+      return;
+    }
+    if (isScoringCustomRef.current) return;
+
+    if (recording.objectUrl) {
+      if (customAudioUrlRef.current) {
+        try {
+          URL.revokeObjectURL(customAudioUrlRef.current);
+        } catch {}
+      }
+      customAudioUrlRef.current = recording.objectUrl;
+      setCustomAudioUrl(recording.objectUrl);
+    }
+
+    isScoringCustomRef.current = true;
+    setSubmittingCustom(true);
+    setCustomError('');
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', recording.blob, recording.filename || 'custom-shadowing.webm');
+      formData.append('textJa', expectedJa);
+      if (expectedVi) formData.append('textVi', expectedVi);
+      formData.append('playbackSpeed', String(ttsSpeed || 1.0));
+      if (fallbackText && fallbackText.trim()) {
+        formData.append('fallbackTranscript', fallbackText.trim());
+      }
+
+      const res = await axiosClient.post('/shadowing/custom/evaluate', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 130000,
+      });
+
+      if (res.success && res.data) {
+        const recognized = res.data.recognizedText || fallbackText || '';
+        latestCustomTranscriptRef.current = recognized;
+        setTranscript(recognized);
+        setCustomResult({ ...res.data, expectedJa });
+        setShowCustomComparison(true);
+      }
+    } catch (err) {
+      setCustomError(
+        err.response?.data?.message ||
+          'Chấm điểm phát âm bằng Local AI thất bại. Bạn có thể kiểm tra Local AI server hoặc dùng nút chấm lại theo văn bản.'
+      );
+    } finally {
+      setSubmittingCustom(false);
+      isScoringCustomRef.current = false;
+    }
+  };
+
+  const toggleRecordingCustom = async () => {
+    if (isRecording) {
+      setIsRecording(false);
+      if (recorderRef.current?.isRecording) {
+        autoScoreTargetOnEndRef.current = null;
+        try {
+          recognitionRef.current?.stop();
+        } catch {}
+        const recording = await recorderRef.current.stop();
+        await evaluateCustomAudioWithLocalAi(recording, latestCustomTranscriptRef.current);
+        return;
+      }
+      autoScoreTargetOnEndRef.current = 'custom';
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        setIsRecording(false);
+      }
       return;
     }
 
-    if (isRecording) {
-      // Người dùng nhấn Dừng ghi âm -> Tự động dừng và tự động gửi chấm điểm
-      autoScoreTargetOnEndRef.current = 'custom';
+    stopJapaneseAudio();
+    recordingTargetRef.current = 'custom';
+    autoScoreTargetOnEndRef.current = null;
+    latestCustomTranscriptRef.current = '';
+    setCustomRecordingSec(0);
+    setTranscript('');
+    setCustomResult(null);
+    setCustomError('');
+
+    if (isMediaRecorderSupported()) {
       try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        setIsRecording(false);
-      }
-    } else {
-      recordingTargetRef.current = 'custom';
-      autoScoreTargetOnEndRef.current = null;
-      latestCustomTranscriptRef.current = '';
-      setTranscript('');
-      setCustomResult(null);
-      setCustomError('');
-      try {
-        recognitionRef.current.start();
+        const recorder = new ShadowingAudioRecorder({
+          onDurationChange: (sec) => setCustomRecordingSec(sec),
+          maxSeconds: 35,
+        });
+        recorderRef.current = recorder;
+        await recorder.start();
         setIsRecording(true);
+        try {
+          recognitionRef.current?.start();
+        } catch {}
       } catch (err) {
-        console.error('Start recording failed:', err);
+        setCustomError(
+          err?.name === 'NotAllowedError'
+            ? 'Trình duyệt chưa được cấp quyền Micro. Vui lòng bật quyền Micro và thử lại.'
+            : err?.message || 'Không thể bắt đầu ghi âm từ micro.'
+        );
       }
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      setShowCustomComparison(true);
+      setCustomError('Trình duyệt không hỗ trợ ghi âm micro hoặc Web Speech API tiếng Nhật.');
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Start recording failed:', err);
     }
   };
 
@@ -1149,7 +1383,11 @@ export const ShadowingList = () => {
                         onClick={toggleYoutubeRecording}
                       >
                         {ytRecording ? <MicOff size={16} /> : <Mic size={16} />}
-                        <span>{ytRecording ? 'Dừng ghi âm (Tự động chấm)' : 'Ghi âm câu này'}</span>
+                        <span>
+                          {ytRecording
+                            ? `Dừng ghi âm (${formatDuration(ytRecordingSec)})`
+                            : 'Ghi âm câu này (Local AI)'}
+                        </span>
                       </button>
 
                       <button
@@ -1188,44 +1426,16 @@ export const ShadowingList = () => {
                     )}
 
                     {activeYtResult && (
-                      <div className="mt-3 p-3 bg-light rounded-3 border">
-                        <div className="d-flex justify-content-between align-items-center mb-2">
-                          <span className="fw-bold text-dark">
-                            Kết quả đánh giá — Độ chính xác: <strong className="text-primary fs-5">{Math.round(activeYtResult.accuracy)}%</strong>
-                          </span>
-                        </div>
-                        <div className="row g-2 mb-2 small">
-                          <div className="col-12 col-md-6">
-                            <div className="p-2 bg-white rounded border">
-                              <span className="text-muted">Câu gốc: </span>
-                              <strong className="font-jp text-dark">{activeYtSegment.textJa}</strong>
-                            </div>
-                          </div>
-                          <div className="col-12 col-md-6">
-                            <div className="p-2 bg-white rounded border">
-                              <span className="text-muted">Bạn đã nói: </span>
-                              <strong className="font-jp text-primary">{activeYtResult.recognizedText || ytTranscript}</strong>
-                            </div>
-                          </div>
-                        </div>
-                        {ytShowDiff && activeYtResult.wordDiff && (
-                          <div className="d-flex flex-wrap gap-1.5 font-jp">
-                            {activeYtResult.wordDiff.map((w, i) => (
-                              <span
-                                key={i}
-                                className={`badge ${
-                                  w.status === 'CORRECT'
-                                    ? 'bg-success'
-                                    : w.status === 'WRONG'
-                                    ? 'bg-danger'
-                                    : 'bg-warning text-dark'
-                                }`}
-                              >
-                                {w.text}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+                      <div className="mt-3">
+                        <ShadowingEvaluationPanel
+                          attemptResult={activeYtResult}
+                          expectedTextJa={activeYtSegment.textJa}
+                          recordedAudioUrl={ytAudioUrlsBySegId[activeYtSegment.id] || null}
+                          title={`Kết quả câu ${ytActiveSegIndex + 1}`}
+                          showComparisonText={ytShowDiff}
+                          onToggleComparisonText={() => setYtShowDiff((v) => !v)}
+                          compact
+                        />
                       </div>
                     )}
                   </div>
@@ -1552,17 +1762,17 @@ export const ShadowingList = () => {
             <div className="small fw-semibold text-muted mb-3">
               {isRecording ? (
                 <span className="text-danger fw-bold">
-                  Đang lắng nghe... Hãy đọc to câu tiếng Nhật phía trên, sau đó bấm Dừng để tự động chấm điểm!
+                  Đang ghi âm ({formatDuration(customRecordingSec)})... Hãy đọc to câu tiếng Nhật phía trên, sau đó bấm Dừng để Local AI chấm điểm!
                 </span>
               ) : submittingCustom ? (
                 <span className="text-primary fw-bold">
                   <Loader2 size={16} className="spinner-border spinner-border-sm me-1" />
-                  Đã dừng ghi âm — Đang tự động chấm điểm phát âm...
+                  Local AI đang phân tích phát âm, mora, trọng âm & ngữ điệu F0...
                 </span>
               ) : transcript ? (
-                <span className="text-success fw-bold">✓ Đã nhận diện giọng nói và tự động chấm điểm!</span>
+                <span className="text-success fw-bold">✓ Đã phân tích phát âm xong!</span>
               ) : (
-                'Bấm biểu tượng Micro để bắt đầu đọc — Khi bấm Dừng ghi âm, hệ thống sẽ tự động chấm điểm ngay'
+                'Bấm biểu tượng Micro để ghi âm — Khi bấm Dừng, hệ thống tự động chấm phát âm chi tiết bằng Local AI'
               )}
             </div>
 
@@ -1604,74 +1814,15 @@ export const ShadowingList = () => {
           </div>
 
           {customResult && (
-            <div className="card bg-light border-0 p-4 rounded-4 mt-3">
-              <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3 border-bottom pb-3">
-                <div className="d-flex align-items-center gap-2">
-                  <Award size={28} className="text-warning" />
-                  <h5 className="fw-bold text-dark mb-0">Kết quả đánh giá</h5>
-                </div>
-
-                <div className="d-flex align-items-center gap-2">
-                  <span className="fs-3 fw-bold text-primary">{Math.round(customResult.accuracy)}%</span>
-                  <button
-                    type="button"
-                    className="btn btn-outline-primary btn-sm"
-                    onClick={() => setShowCustomComparison(!showCustomComparison)}
-                  >
-                    {showCustomComparison ? 'Ẩn văn bản đối chiếu' : 'Hiện văn bản đối chiếu'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="row g-2 mb-3 text-start">
-                <div className="col-12 col-md-6">
-                  <div className="p-3 bg-white rounded-3 border">
-                    <div className="text-muted small fw-semibold mb-1">Câu gốc:</div>
-                    <div className="font-jp fw-bold text-dark fs-5">{customResult.expectedJa || customJa}</div>
-                  </div>
-                </div>
-                <div className="col-12 col-md-6">
-                  <div className="p-3 bg-primary bg-opacity-10 rounded-3 border border-primary border-opacity-25">
-                    <div className="text-primary small fw-semibold mb-1">Bạn đã nói:</div>
-                    <div className="font-jp fw-bold text-dark fs-5">{customResult.recognizedText || transcript}</div>
-                  </div>
-                </div>
-              </div>
-
-              {showCustomComparison && (
-                <div
-                  className="p-4 rounded-4 border font-jp"
-                  style={{
-                    background: '#1a1d24',
-                    color: '#ffffff',
-                  }}
-                >
-                  <div className="d-flex flex-wrap gap-2.5 align-items-center">
-                    {(customResult.wordDiff || []).map((item, idx) => {
-                      const wordText = item.text || item.originalWord || item.heard || '';
-                      const isCorrect = item.status === 'CORRECT';
-                      const isWrong = item.status === 'WRONG';
-                      return (
-                        <div
-                          key={idx}
-                          className="d-inline-flex align-items-center gap-1.5 px-3 py-2 rounded-3 fw-bold"
-                          style={{
-                            background: isCorrect
-                              ? 'rgba(16, 185, 129, 0.15)'
-                              : isWrong
-                              ? 'rgba(239, 68, 68, 0.15)'
-                              : 'rgba(245, 158, 11, 0.15)',
-                            border: `1.5px solid ${isCorrect ? '#10b981' : isWrong ? '#ef4444' : '#f59e0b'}`,
-                            color: isCorrect ? '#34d399' : isWrong ? '#f87171' : '#fbbf24',
-                          }}
-                        >
-                          <span>{wordText}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+            <div className="mt-3">
+              <ShadowingEvaluationPanel
+                attemptResult={customResult}
+                expectedTextJa={customResult.expectedJa || customJa}
+                recordedAudioUrl={customAudioUrl}
+                title="Kết quả đánh giá phát âm"
+                showComparisonText={showCustomComparison}
+                onToggleComparisonText={() => setShowCustomComparison(!showCustomComparison)}
+              />
             </div>
           )}
         </div>

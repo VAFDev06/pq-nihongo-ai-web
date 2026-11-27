@@ -38,6 +38,9 @@ public class ShadowingAttempt {
     @Column(name = "word_diff", nullable = false, columnDefinition = "TEXT")
     private String wordDiff; // JSON array of WordDiffItem
 
+    @Column(name = "evaluation_json", columnDefinition = "TEXT")
+    private String evaluationJson; // Optional JSON of ShadowingEvaluationResultDto (nullable for backward compatibility)
+
     @Column(name = "audio_url", length = 500)
     private String audioUrl;
 

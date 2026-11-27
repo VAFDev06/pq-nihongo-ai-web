@@ -8,16 +8,22 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
+import org.springframework.http.MediaType;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import vn.vku.nihongoai.common.ApiResponse;
 import vn.vku.nihongoai.common.PageMeta;
 import vn.vku.nihongoai.security.UserDetailsImpl;
+import vn.vku.nihongoai.shadowing.ai.ShadowingAiService;
+import vn.vku.nihongoai.shadowing.dto.ShadowingAiStatusDto;
 import vn.vku.nihongoai.shadowing.dto.ShadowingAttemptDto;
+import vn.vku.nihongoai.shadowing.dto.ShadowingEvaluationResultDto;
 import vn.vku.nihongoai.shadowing.dto.ShadowingLessonDto;
 import vn.vku.nihongoai.shadowing.dto.SubmitShadowingAttemptRequest;
 import vn.vku.nihongoai.user.JlptLevel;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 @RestController
@@ -27,6 +33,68 @@ import java.util.List;
 public class ShadowingController {
 
     private final ShadowingService shadowingService;
+    private final ShadowingAiService shadowingAiService;
+
+    @GetMapping("/ai-status")
+    @Operation(summary = "Kiểm tra trạng thái máy chủ Local Shadowing AI (không sử dụng Gemini)")
+    public ApiResponse<ShadowingAiStatusDto> getAiStatus() {
+        return ApiResponse.ok(shadowingAiService.getStatus());
+    }
+
+    @PostMapping(value = "/evaluate", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "Đánh giá file ghi âm Shadowing bằng Local AI (Qwen3-ASR, ForcedAligner, hatsuon, F0 Intonation + Kuromoji)")
+    public ApiResponse<ShadowingEvaluationResultDto> evaluateAudio(
+            @RequestPart("audio") MultipartFile audio,
+            @RequestParam("referenceText") String referenceText,
+            @RequestPart(value = "referenceAudio", required = false) MultipartFile referenceAudio,
+            @RequestParam(value = "jlptLevel", required = false) String jlptLevel,
+            @RequestParam(value = "fallbackTranscript", required = false) String fallbackTranscript
+    ) {
+        return ApiResponse.ok(
+                shadowingAiService.evaluateAudioOnly(audio, referenceText, referenceAudio, jlptLevel, fallbackTranscript),
+                "Đánh giá phát âm Shadowing bằng Local AI thành công"
+        );
+    }
+
+    @PostMapping(value = "/lessons/{id}/evaluate", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "Gửi file ghi âm bài luyện Shadowing để chấm điểm phát âm, mora, trọng âm và ngữ điệu bằng Local AI")
+    public ApiResponse<ShadowingAttemptDto> evaluateLessonAudio(
+            @AuthenticationPrincipal UserDetailsImpl userDetails,
+            @PathVariable Long id,
+            @RequestPart("audio") MultipartFile audio,
+            @RequestPart(value = "referenceAudio", required = false) MultipartFile referenceAudio,
+            @RequestParam(value = "lineId", required = false) Long lineId,
+            @RequestParam(value = "expectedTextJa", required = false) String expectedTextJa,
+            @RequestParam(value = "playbackSpeed", required = false, defaultValue = "1.00") BigDecimal playbackSpeed,
+            @RequestParam(value = "fallbackTranscript", required = false) String fallbackTranscript
+    ) {
+        return ApiResponse.ok(
+                shadowingAiService.evaluateLessonAttempt(
+                        userDetails.getId(), id, audio, referenceAudio, lineId, expectedTextJa, playbackSpeed, fallbackTranscript
+                ),
+                "Đánh giá phát âm bằng Local AI thành công"
+        );
+    }
+
+    @PostMapping(value = "/custom/evaluate", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "Gửi file ghi âm câu tự nhập / YouTube để chấm điểm phát âm chi tiết bằng Local AI")
+    public ApiResponse<ShadowingAttemptDto> evaluateCustomAudio(
+            @AuthenticationPrincipal UserDetailsImpl userDetails,
+            @RequestPart("audio") MultipartFile audio,
+            @RequestParam("textJa") String textJa,
+            @RequestParam(value = "textVi", required = false) String textVi,
+            @RequestPart(value = "referenceAudio", required = false) MultipartFile referenceAudio,
+            @RequestParam(value = "playbackSpeed", required = false, defaultValue = "1.00") BigDecimal playbackSpeed,
+            @RequestParam(value = "jlptLevel", required = false) String jlptLevel,
+            @RequestParam(value = "fallbackTranscript", required = false) String fallbackTranscript
+    ) {
+        return ApiResponse.ok(
+                shadowingAiService.evaluateCustomAttempt(
+                        userDetails.getId(), audio, textJa, textVi, referenceAudio, playbackSpeed, jlptLevel, fallbackTranscript
+                ),
+                "Đánh giá phát âm câu tự nhập bằng Local AI thành công"
+        );
+    }
 
     @GetMapping("/lessons")
     @Operation(summary = "Lấy danh sách các bài luyện Shadowing")

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axiosClient from '../../api/axiosClient';
-import { ArrowLeft, History, Eye } from 'lucide-react';
+import ShadowingEvaluationPanel from '../../components/shadowing/ShadowingEvaluationPanel';
+import { ArrowLeft, History, Eye, Cpu } from 'lucide-react';
 
 export const ShadowingHistory = () => {
   const [history, setHistory] = useState([]);
@@ -69,7 +70,13 @@ export const ShadowingHistory = () => {
                     <tr key={item.id}>
                       <td className="text-muted small">{idx + 1}</td>
                       <td className="fw-semibold text-dark">
-                        {item.lessonTitle || `Bài học #${item.lessonId}`}
+                        <div>{item.lessonTitle || `Bài học #${item.lessonId}`}</div>
+                        {item.evaluation && (
+                          <span className="badge bg-primary bg-opacity-10 text-primary border border-primary border-opacity-25 mt-1 d-inline-flex align-items-center gap-1">
+                            <Cpu size={10} />
+                            <span>Local AI</span>
+                          </span>
+                        )}
                       </td>
                       <td className="font-jp small text-dark">{item.recognizedText}</td>
                       <td>
@@ -106,10 +113,10 @@ export const ShadowingHistory = () => {
         )}
       </div>
 
-      {/* Modal Xem chi tiết Word Diff */}
+      {/* Modal Xem chi tiết Word Diff & Local AI Evaluation */}
       {selectedAttempt && (
         <div className="modal show d-block" tabIndex="-1" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
-          <div className="modal-dialog modal-dialog-centered modal-lg">
+          <div className="modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable">
             <div className="modal-content rounded-4 border-0 shadow">
               <div className="modal-header border-bottom">
                 <h5 className="modal-title fw-bold">
@@ -118,36 +125,16 @@ export const ShadowingHistory = () => {
                 <button type="button" className="btn-close" onClick={() => setSelectedAttempt(null)}></button>
               </div>
               <div className="modal-body">
-                <div className="mb-3">
-                  <div className="small text-muted fw-semibold">Câu nhận diện từ bạn:</div>
-                  <div className="fs-5 font-jp fw-bold text-dark">{selectedAttempt.recognizedText}</div>
-                </div>
-                <div className="small text-muted fw-semibold mb-2">Phân tích từng từ (Token Breakdown):</div>
-                <div className="p-4 rounded-4 font-jp" style={{ background: '#1a1d24', color: '#fff' }}>
-                  <div className="d-flex flex-wrap gap-2">
-                    {(selectedAttempt.wordDiff || []).map((tok, i) => {
-                      const colorMap = {
-                        CORRECT: { bg: 'rgba(16,185,129,0.15)', border: '#10b981', color: '#34d399', icon: '✓' },
-                        WRONG: { bg: 'rgba(239,68,68,0.15)', border: '#ef4444', color: '#f87171', icon: '✗' },
-                        MISSING: { bg: 'rgba(245,158,11,0.15)', border: '#f59e0b', color: '#fbbf24', icon: '⚠' },
-                        EXTRA: { bg: 'rgba(56,189,248,0.15)', border: '#38bdf8', color: '#7dd3fc', icon: '+' },
-                      };
-                      const st = colorMap[tok.status] || colorMap.CORRECT;
-                      return (
-                        <div
-                          key={i}
-                          className="px-3 py-1.5 rounded-3 fw-bold d-inline-flex flex-column align-items-center"
-                          style={{ background: st.bg, border: `1.5px solid ${st.border}`, color: st.color }}
-                        >
-                          <div>{tok.text} {st.icon}</div>
-                          {tok.heard && (
-                            <span style={{ fontSize: '0.7rem', fontWeight: 'normal' }}>nghe: {tok.heard}</span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                <ShadowingEvaluationPanel
+                  attemptResult={selectedAttempt}
+                  expectedTextJa={selectedAttempt.evaluation?.referenceText}
+                  title={`Lần luyện ngày ${
+                    selectedAttempt.createdAt
+                      ? new Date(selectedAttempt.createdAt).toLocaleString('vi-VN')
+                      : ''
+                  }`}
+                  compact
+                />
               </div>
               <div className="modal-footer border-top">
                 <button type="button" className="btn btn-secondary" onClick={() => setSelectedAttempt(null)}>

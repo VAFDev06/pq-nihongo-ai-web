@@ -2,13 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axiosClient from '../../api/axiosClient';
 import FuriganaText from '../../components/common/FuriganaText';
+import ShadowingEvaluationPanel from '../../components/shadowing/ShadowingEvaluationPanel';
 import { useAuth } from '../../auth/AuthContext';
 import { TTS_SPEED_OPTIONS, speakJapanese, speakJapaneseSequence, stopJapaneseAudio } from '../../utils/tts';
+import {
+  ShadowingAudioRecorder,
+  isMediaRecorderSupported,
+  formatDuration,
+} from '../../utils/shadowingRecorder';
 import {
   ArrowLeft,
   Mic,
   MicOff,
-  Award,
   AlertCircle,
   Sparkles,
   Loader2,
@@ -21,6 +26,7 @@ import {
   SkipForward,
   CheckCircle2,
   MessagesSquare,
+  Cpu,
 } from 'lucide-react';
 
 export const ShadowingPractice = () => {
@@ -32,17 +38,21 @@ export const ShadowingPractice = () => {
   const [activeLineIndex, setActiveLineIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSec, setRecordingSec] = useState(0);
   const [isPlayingSample, setIsPlayingSample] = useState(false);
   const [isPlayingFullDialogue, setIsPlayingFullDialogue] = useState(false);
   const [playingDialogueIdx, setPlayingDialogueIdx] = useState(-1);
   const [transcript, setTranscript] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [resultsByLineIdx, setResultsByLineIdx] = useState({});
+  const [audioUrlsByLineIdx, setAudioUrlsByLineIdx] = useState({});
+  const [aiStatus, setAiStatus] = useState(null);
   const [error, setError] = useState('');
 
   const [showTranslation, setShowTranslation] = useState(false); // Mặc định ẩn bản dịch để tập trung luyện nghe
   const [showComparisonText, setShowComparisonText] = useState(true);
 
+  const recorderRef = useRef(null);
   const recognitionRef = useRef(null);
   const latestTranscriptRef = useRef('');
   const recordStartAtRef = useRef(0);
@@ -50,6 +60,7 @@ export const ShadowingPractice = () => {
   const isScoringRef = useRef(false);
   const activeLineRef = useRef(null);
   const activeLineIdxRef = useRef(0);
+  const audioUrlsRef = useRef({});
 
   useEffect(() => {
     const fetchLesson = async () => {
@@ -83,16 +94,96 @@ export const ShadowingPractice = () => {
       }
     };
     fetchLesson();
-    return () => stopJapaneseAudio();
+
+    axiosClient
+      .get('/shadowing/ai-status')
+      .then((res) => {
+        if (res?.success && res.data) setAiStatus(res.data);
+      })
+      .catch(() => {});
+
+    return () => {
+      stopJapaneseAudio();
+      recorderRef.current?.cancel();
+      Object.values(audioUrlsRef.current).forEach((u) => {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {}
+      });
+    };
   }, [id]);
 
   const currentLine = lines[activeLineIndex] || null;
   const attemptResult = resultsByLineIdx[activeLineIndex] || null;
+  const recordedAudioUrl = audioUrlsByLineIdx[activeLineIndex] || null;
 
   useEffect(() => {
     activeLineRef.current = currentLine;
     activeLineIdxRef.current = activeLineIndex;
   }, [currentLine, activeLineIndex]);
+
+  const scoreAudioWithLocalAi = async (recording, fallbackText = '') => {
+    const line = activeLineRef.current;
+    const idxToSave = activeLineIdxRef.current;
+    if (!recording?.blob || recording.blob.size === 0 || !line) {
+      setError('Không thu được dữ liệu âm thanh từ micro. Vui lòng thử ghi âm lại.');
+      return;
+    }
+    if (recording.durationSec < 0.35) {
+      setError('Thời gian ghi âm quá ngắn. Vui lòng bấm Micro và đọc trọn câu tiếng Nhật.');
+      return;
+    }
+    if (isScoringRef.current) return;
+
+    isScoringRef.current = true;
+    setSubmitting(true);
+    setError('');
+
+    if (recording.objectUrl) {
+      setAudioUrlsByLineIdx((prev) => {
+        if (prev[idxToSave]) {
+          try {
+            URL.revokeObjectURL(prev[idxToSave]);
+          } catch {}
+        }
+        const next = { ...prev, [idxToSave]: recording.objectUrl };
+        audioUrlsRef.current = next;
+        return next;
+      });
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', recording.blob, recording.filename || 'shadowing.webm');
+      if (line.id) formData.append('lineId', String(line.id));
+      formData.append('expectedTextJa', line.japaneseText || '');
+      formData.append('playbackSpeed', String(ttsSpeed || 1.0));
+      if (fallbackText && fallbackText.trim()) {
+        formData.append('fallbackTranscript', fallbackText.trim());
+      }
+
+      const res = await axiosClient.post(`/shadowing/lessons/${id}/evaluate`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 130000,
+      });
+
+      if (res.success && res.data) {
+        const recognized = res.data.recognizedText || fallbackText || '';
+        latestTranscriptRef.current = recognized;
+        setTranscript(recognized);
+        setResultsByLineIdx((prev) => ({ ...prev, [idxToSave]: res.data }));
+        setShowComparisonText(true);
+      }
+    } catch (err) {
+      setError(
+        err.response?.data?.message ||
+          'Chấm điểm phát âm bằng Local AI thất bại. Vui lòng kiểm tra Local Shadowing AI server hoặc bấm "Chấm điểm lại theo văn bản trên".'
+      );
+    } finally {
+      setSubmitting(false);
+      isScoringRef.current = false;
+    }
+  };
 
   const scoreRecognizedText = async (textToScore) => {
     const line = activeLineRef.current;
@@ -131,7 +222,7 @@ export const ShadowingPractice = () => {
   const scoreFnRef = useRef(scoreRecognizedText);
   scoreFnRef.current = scoreRecognizedText;
 
-  // Web Speech API
+  // Web Speech API (live transcript preview & fallback if MediaRecorder unavailable)
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
@@ -149,15 +240,17 @@ export const ShadowingPractice = () => {
         setTranscript(currentTranscript);
       };
 
-      recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        setIsRecording(false);
-        autoScoreOnEndRef.current = false;
+      recognition.onerror = () => {
+        if (!recorderRef.current?.isRecording) {
+          setIsRecording(false);
+          autoScoreOnEndRef.current = false;
+        }
       };
 
       recognition.onend = () => {
-        setIsRecording(false);
-        if (autoScoreOnEndRef.current) {
+        // Only trigger text-only auto-score when MediaRecorder is NOT active
+        if (!recorderRef.current?.isRecording && autoScoreOnEndRef.current) {
+          setIsRecording(false);
           autoScoreOnEndRef.current = false;
           const finalRecognized = (latestTranscriptRef.current || '').trim();
           const durationMs = Date.now() - recordStartAtRef.current;
@@ -245,44 +338,87 @@ export const ShadowingPractice = () => {
     setError('');
   };
 
-  const toggleRecording = () => {
-    if (!recognitionRef.current) {
-      setShowComparisonText(true);
-      alert('Trình duyệt không hỗ trợ Web Speech API tiếng Nhật. Bạn có thể nhập câu đọc vào ô đối chiếu.');
+  const toggleRecording = async () => {
+    if (isRecording) {
+      setIsRecording(false);
+      if (recorderRef.current?.isRecording) {
+        autoScoreOnEndRef.current = false;
+        try {
+          recognitionRef.current?.stop();
+        } catch {}
+        const recording = await recorderRef.current.stop();
+        const fallbackText = (latestTranscriptRef.current || '').trim();
+        await scoreAudioWithLocalAi(recording, fallbackText);
+        return;
+      }
+      autoScoreOnEndRef.current = true;
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        setIsRecording(false);
+      }
       return;
     }
 
-    if (isRecording) {
-      autoScoreOnEndRef.current = true;
+    stopJapaneseAudio();
+    setIsPlayingSample(false);
+    setIsPlayingFullDialogue(false);
+    setPlayingDialogueIdx(-1);
+    latestTranscriptRef.current = '';
+    recordStartAtRef.current = Date.now();
+    autoScoreOnEndRef.current = false;
+    setRecordingSec(0);
+    setTranscript('');
+    setError('');
+
+    if (isMediaRecorderSupported()) {
       try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        setIsRecording(false);
-      }
-    } else {
-      stopJapaneseAudio();
-      setIsPlayingSample(false);
-      setIsPlayingFullDialogue(false);
-      setPlayingDialogueIdx(-1);
-      latestTranscriptRef.current = '';
-      recordStartAtRef.current = Date.now();
-      autoScoreOnEndRef.current = false;
-      setTranscript('');
-      setError('');
-      try {
-        recognitionRef.current.start();
+        const recorder = new ShadowingAudioRecorder({
+          onDurationChange: (sec) => setRecordingSec(sec),
+          maxSeconds: 35,
+        });
+        recorderRef.current = recorder;
+        await recorder.start();
         setIsRecording(true);
+        // Optional parallel Web Speech live preview (best effort, never blocks recording)
+        try {
+          recognitionRef.current?.start();
+        } catch {}
       } catch (err) {
-        console.error('Start recording failed:', err);
+        setError(
+          err?.name === 'NotAllowedError'
+            ? 'Trình duyệt chưa được cấp quyền sử dụng Micro. Vui lòng cho phép quyền Micro và thử lại.'
+            : err?.message || 'Không thể bắt đầu ghi âm từ micro.'
+        );
       }
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      setShowComparisonText(true);
+      setError('Trình duyệt không hỗ trợ ghi âm micro hoặc Web Speech API. Bạn có thể gõ câu đọc vào ô đối chiếu.');
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Start recording failed:', err);
     }
   };
 
   const handleResetLine = () => {
     stopJapaneseAudio();
     autoScoreOnEndRef.current = false;
-    if (isRecording && recognitionRef.current) recognitionRef.current.stop();
+    recorderRef.current?.cancel();
+    if (isRecording && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+    }
     setIsRecording(false);
+    setRecordingSec(0);
     setIsPlayingSample(false);
     setIsPlayingFullDialogue(false);
     setPlayingDialogueIdx(-1);
@@ -291,6 +427,17 @@ export const ShadowingPractice = () => {
     setResultsByLineIdx((prev) => {
       const next = { ...prev };
       delete next[activeLineIndex];
+      return next;
+    });
+    setAudioUrlsByLineIdx((prev) => {
+      if (prev[activeLineIndex]) {
+        try {
+          URL.revokeObjectURL(prev[activeLineIndex]);
+        } catch {}
+      }
+      const next = { ...prev };
+      delete next[activeLineIndex];
+      audioUrlsRef.current = next;
       return next;
     });
     setError('');
@@ -345,6 +492,19 @@ export const ShadowingPractice = () => {
         </div>
 
         <div className="d-flex flex-wrap align-items-center gap-2">
+          {aiStatus && (
+            <span
+              className={`badge rounded-pill px-2.5 py-1.5 border d-inline-flex align-items-center gap-1 ${
+                aiStatus.available
+                  ? 'bg-primary bg-opacity-10 text-primary border-primary border-opacity-25'
+                  : 'bg-light text-secondary'
+              }`}
+              title={aiStatus.message || ''}
+            >
+              <Cpu size={13} />
+              <span>{aiStatus.available ? 'Local AI sẵn sàng' : 'Local AI offline'}</span>
+            </span>
+          )}
           <button
             type="button"
             className={`btn btn-sm d-flex align-items-center gap-1.5 rounded-pill px-3 py-1.5 fw-semibold ${
@@ -560,15 +720,15 @@ export const ShadowingPractice = () => {
                 <div className="small fw-semibold text-muted mb-3">
                   {isRecording ? (
                     <span className="text-danger fw-bold">
-                      Đang ghi âm... Hãy đọc to câu tiếng Nhật phía trên, sau đó bấm Dừng để tự động chấm điểm!
+                      Đang ghi âm ({formatDuration(recordingSec)})... Hãy đọc to câu tiếng Nhật phía trên, sau đó bấm Dừng để Local AI chấm điểm!
                     </span>
                   ) : submitting ? (
                     <span className="text-primary fw-bold">
                       <Loader2 size={15} className="spinner-border spinner-border-sm me-1" />
-                      Đang tự động chấm điểm phát âm...
+                      Local AI đang phân tích phát âm, mora, trọng âm & ngữ điệu F0...
                     </span>
                   ) : (
-                    'Bấm Micro để đọc — Khi bấm Dừng ghi âm, hệ thống tự động chấm điểm ngay'
+                    'Bấm Micro để ghi âm — Khi bấm Dừng, hệ thống tự động chấm phát âm chi tiết bằng Local AI'
                   )}
                 </div>
 
@@ -599,76 +759,16 @@ export const ShadowingPractice = () => {
               </div>
             </div>
 
-            {/* Attempt Result Card */}
+            {/* Attempt Result Card (Local AI Structured Evaluation + Kuromoji Word Diff) */}
             {attemptResult && (
-              <div className="card pq-card p-4 rounded-4 shadow-sm border">
-                <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3 border-bottom pb-3">
-                  <div className="d-flex align-items-center gap-2">
-                    <Award size={24} className="text-warning" />
-                    <h6 className="fw-bold mb-0">Kết quả chấm điểm câu {activeLineIndex + 1}</h6>
-                  </div>
-                  <div className="d-flex align-items-center gap-2">
-                    <span className="fs-3 fw-bold text-primary">
-                      {Math.round(attemptResult.accuracy || attemptResult.accuracyScore || 0)}%
-                    </span>
-                    <button
-                      type="button"
-                      className="btn btn-outline-secondary btn-sm"
-                      onClick={() => setShowComparisonText((p) => !p)}
-                    >
-                      {showComparisonText ? 'Ẩn đối chiếu' : 'Hiện đối chiếu'}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="row g-2 mb-3 text-start">
-                  <div className="col-12 col-md-6">
-                    <div className="p-2.5 bg-light rounded-3 border">
-                      <div className="text-muted small fw-semibold mb-1">Câu gốc:</div>
-                      <div className="font-jp fw-bold text-dark">{currentLine.japaneseText}</div>
-                    </div>
-                  </div>
-                  <div className="col-12 col-md-6">
-                    <div className="p-2.5 bg-primary bg-opacity-10 rounded-3 border border-primary border-opacity-25">
-                      <div className="text-primary small fw-semibold mb-1">Bạn đã nói:</div>
-                      <div className="font-jp fw-bold text-dark">{attemptResult.recognizedText || transcript}</div>
-                    </div>
-                  </div>
-                </div>
-
-                {showComparisonText && (
-                  <div className="p-3.5 rounded-4 border font-jp" style={{ background: '#1a1d24', color: '#ffffff' }}>
-                    <div className="d-flex flex-wrap gap-2 align-items-center">
-                      {(attemptResult.wordDiff || attemptResult.tokenAlignments || []).map((tok, idx) => {
-                        const text = tok.text || tok.expectedSurface || tok.heard || '';
-                        const color =
-                          tok.status === 'CORRECT'
-                            ? { bg: 'rgba(16, 185, 129, 0.15)', bd: '#10b981', fg: '#34d399', icon: '✓' }
-                            : tok.status === 'WRONG'
-                            ? { bg: 'rgba(239, 68, 68, 0.15)', bd: '#ef4444', fg: '#f87171', icon: '✗' }
-                            : tok.status === 'MISSING'
-                            ? { bg: 'rgba(245, 158, 11, 0.15)', bd: '#f59e0b', fg: '#fbbf24', icon: '⚠' }
-                            : { bg: 'rgba(56, 189, 248, 0.15)', bd: '#38bdf8', fg: '#7dd3fc', icon: '+' };
-                        return (
-                          <div
-                            key={idx}
-                            className="d-inline-flex align-items-center gap-1 px-2.5 py-1.5 rounded-3 fw-bold"
-                            style={{
-                              background: color.bg,
-                              border: `1.5px solid ${color.bd}`,
-                              color: color.fg,
-                              fontSize: '1.05rem',
-                            }}
-                          >
-                            <span>{text}</span>
-                            <span style={{ fontSize: '0.8rem' }}>{color.icon}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
+              <ShadowingEvaluationPanel
+                attemptResult={attemptResult}
+                expectedTextJa={currentLine.japaneseText}
+                recordedAudioUrl={recordedAudioUrl}
+                title={`Kết quả chấm điểm câu ${activeLineIndex + 1}`}
+                showComparisonText={showComparisonText}
+                onToggleComparisonText={() => setShowComparisonText((p) => !p)}
+              />
             )}
           </div>
         </div>

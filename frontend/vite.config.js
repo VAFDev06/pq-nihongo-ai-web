@@ -10,7 +10,9 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8080',
-        changeOrigin: true
+        changeOrigin: true,
+        timeout: 150000,
+        proxyTimeout: 150000
       },
       '/uploads': {
         target: 'http://localhost:8080',

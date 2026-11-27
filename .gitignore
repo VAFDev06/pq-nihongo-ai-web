@@ -6,6 +6,11 @@
 # Dependencies & bundled local tools
 frontend/node_modules/
 backend/.mvn/maven/
+ai-shadowing/.venv/
+ai-shadowing/.cache/
+ai-shadowing/.pytest_cache/
+**/__pycache__/
+*.py[cod]
 
 # Test and build outputs
 frontend/dist/

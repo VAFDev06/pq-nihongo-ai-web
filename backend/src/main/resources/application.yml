@@ -58,8 +58,16 @@ app:
   ai:
     timeout-seconds: 30
 
-# Google Gemini API
+# Google Gemini API (used by AI Chat, Vision, and Translation features; NOT used by Shadowing evaluation)
 gemini:
   api-key: ${GEMINI_API_KEY:}
   model: ${GEMINI_MODEL:gemini-3-flash-preview}
   base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com}
+
+# Private Local Shadowing AI Model Server (Qwen3-ASR, Qwen3-ForcedAligner, hatsuon, F0 Intonation)
+shadowing:
+  ai:
+    enabled: ${SHADOWING_AI_ENABLED:true}
+    base-url: ${SHADOWING_AI_BASE_URL:http://localhost:8001}
+    timeout-seconds: ${SHADOWING_TIMEOUT_SECONDS:120}
+    max-audio-mb: ${SHADOWING_MAX_AUDIO_MB:15}

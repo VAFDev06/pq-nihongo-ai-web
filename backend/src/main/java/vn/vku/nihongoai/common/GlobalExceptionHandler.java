@@ -114,7 +114,7 @@ public class GlobalExceptionHandler {
         ErrorResponse res = ErrorResponse.builder()
                 .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
                 .code(ErrorCode.INTERNAL_SERVER_ERROR.name())
-                .message("Đã xảy ra lỗi hệ thống: " + ex.getMessage())
+                .message(ErrorCode.INTERNAL_SERVER_ERROR.getDefaultMessage())
                 .build();
         return new ResponseEntity<>(res, HttpStatus.INTERNAL_SERVER_ERROR);
     }

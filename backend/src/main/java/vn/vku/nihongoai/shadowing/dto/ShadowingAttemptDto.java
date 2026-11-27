@@ -23,6 +23,7 @@ public class ShadowingAttemptDto {
     private String recognizedText;
     private BigDecimal accuracy;
     private List<WordDiffItem> wordDiff;
+    private ShadowingEvaluationResultDto evaluation;
     private String audioUrl;
     private BigDecimal playbackSpeed;
     private Instant createdAt;
@@ -35,6 +36,13 @@ public class ShadowingAttemptDto {
             }
         } catch (Exception ignored) {}
 
+        ShadowingEvaluationResultDto evalDto = null;
+        try {
+            if (attempt.getEvaluationJson() != null && !attempt.getEvaluationJson().isBlank()) {
+                evalDto = mapper.readValue(attempt.getEvaluationJson(), ShadowingEvaluationResultDto.class);
+            }
+        } catch (Exception ignored) {}
+
         return ShadowingAttemptDto.builder()
                 .id(attempt.getId())
                 .lessonId(attempt.getLesson().getId())
@@ -42,6 +50,7 @@ public class ShadowingAttemptDto {
                 .recognizedText(attempt.getRecognizedText())
                 .accuracy(attempt.getAccuracy())
                 .wordDiff(diffList)
+                .evaluation(evalDto)
                 .audioUrl(attempt.getAudioUrl())
                 .playbackSpeed(attempt.getPlaybackSpeed())
                 .createdAt(attempt.getCreatedAt())
